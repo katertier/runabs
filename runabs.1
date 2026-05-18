@@ -1,0 +1,598 @@
+.\" Manpage for runabs.sh
+.\" To install:  cp runabs.1 /usr/local/share/man/man1/  &&  mandb
+.\" To preview:  man -l runabs.1
+.TH RUNABS 1 "May 2026" "runabs.sh 4.0" "User Commands"
+.SH NAME
+runabs.sh \- run Audiobookshelf server with Node.js or Bun
+.SH SYNOPSIS
+.B runabs.sh
+.RI [ COMMAND ]
+.RI [ FLAGS ]
+.SH DESCRIPTION
+.B runabs.sh
+is a strict POSIX shell script that clones, builds, and runs
+.UR https://www.audiobookshelf.org
+Audiobookshelf
+.UE ,
+a self-hosted audiobook and podcast server.
+.PP
+The script supports both Node.js (the upstream-supported runtime) and Bun
+(faster, but requires a Socket.IO patch).  It handles cross-platform autostart
+(launchd on macOS, systemd user units on Linux, crontab \fB@reboot\fR
+elsewhere), unicode-aware search (via the nunicode SQLite extension),
+log rotation, and configuration via environment variables or
+.B .env
+files.
+.PP
+The script runs under
+.BR sh ,
+.BR dash ,
+.BR ash ,
+.BR bash ,
+.BR ksh ,
+.BR posh ,
+and
+.BR busybox\ ash .
+No bashisms.
+.SH COMMANDS
+.TP
+.B start
+Start Audiobookshelf as a daemon (default if no command is given).
+The PID is written to
+.IR $ABS_ROOT/audiobookshelf.pid .
+Output goes to
+.IR $ABS_ROOT/audiobookshelf.log .
+.TP
+.B foreground
+Run Audiobookshelf in the current terminal with file-watch (auto-reload on
+source changes).  Useful for first-time setup or debugging.
+Aliases:
+.BR run ,
+.BR fg .
+.TP
+.B stop
+Stop the running daemon.  Sends SIGTERM, waits up to 5 seconds, then
+escalates to SIGKILL.
+.TP
+.B restart
+Stop the running daemon (if any) then start a new one.  Pulls upstream
+changes first if
+.B ABS_AUTO_UPDATE=true
+(default) or
+.B \-\-update
+is passed.
+.TP
+.B status
+Report whether the daemon is running and, if so, its PID.
+.TP
+.B logs
+Tail the daemon log (\fItail -f\fR).
+.TP
+.B check\-update
+Compare the local repository\(aqs HEAD with
+.B origin
+and print a notice if an upstream update is available.  Does not pull.
+.TP
+.B check\-config
+Validate the current configuration and print a detailed report covering
+paths, network, binaries, runtime, features, ABS config, updates, logs,
+and autostart.  Exits non-zero if any validation fails.
+Alias:
+.BR config .
+.TP
+.B install\-service
+Install an autostart service appropriate to the platform: launchd on macOS,
+a systemd user unit on Linux (when available), otherwise a
+.B @reboot
+crontab entry.  The runtime path and
+.B ABS_AUTO_UPDATE
+flag are baked into the service so behaviour stays stable.
+Alias:
+.BR install .
+.TP
+.B uninstall\-service
+Remove the autostart service if installed.  Alias:
+.BR uninstall .
+.TP
+.B init\-config
+Write a commented
+.B .env
+template to
+.IR $ABS_ROOT/.env .
+With
+.BR \-\-home ,
+writes
+.I ~/.env_abs
+instead.
+Alias:
+.BR init .
+.TP
+.BR rebuild\-sqlite ", " rebuild\-sqlite3
+Force a rebuild of the
+.B sqlite3
+native binding inside the ABS repository.  Useful only under the Bun
+runtime: Bun's
+.B bun install
+sometimes skips the postinstall step that compiles
+.IR node_sqlite3.node ,
+which prevents Audiobookshelf from loading the unicode search extension
+.RI ( libnusqlite3 ).
+Internally runs
+.B npm rebuild sqlite3
+against the existing installation.  No-op under Node.js (where the
+binding is already built by
+.BR "npm install" ).
+The rebuild requires
+.B npm
+to be installed; the rebuild process itself does not run Node.
+.TP
+.B version
+Print the script version and exit.
+.TP
+.B help
+Print the help screen and exit.
+.SH FLAGS
+.SS Mode
+.TP
+.BR \-\-dev ", " \-d
+Run Audiobookshelf in development mode.
+.TP
+.BR \-\-prod ", " \-p
+Run in production mode (default).
+.SS Updates
+.TP
+.B \-\-update
+Pull upstream changes before starting.  Used when
+.B ABS_AUTO_UPDATE=false
+to opt in for a single run.
+.TP
+.B \-\-no\-update
+Skip pulling upstream changes.  Used when
+.B ABS_AUTO_UPDATE=true
+(default) to opt out for a single run.
+.SS init-config
+.TP
+.B \-\-home
+With
+.BR init\-config ,
+writes the template to
+.I ~/.env_abs
+instead of
+.IR $ABS_ROOT/.env .
+.SS General
+.TP
+.BR \-\-help ", " \-h
+Show the help screen.
+.TP
+.BR \-\-version ", " \-V
+Print the script version.
+.SH CONFIGURATION
+Configuration is read in this order, highest priority first:
+.IP 1. 4
+Environment variables set in the shell or service definition.
+.IP 2. 4
+.IR ~/.env_abs " (user-global)."
+.IP 3. 4
+.I .env
+next to the script (directory-local).
+.IP 4. 4
+Hardcoded defaults in the script.
+.PP
+Both env files are
+.I sourced
+by the shell, so they use POSIX shell syntax:
+.B VAR="value"
+per line, comments with
+.BR # .
+.SS Environment variables
+.TP
+.B ABS_ROOT
+Root directory for all Audiobookshelf data (repo clone, config, metadata,
+logs).  Default:
+.IR $HOME/audiobookshelf .
+.TP
+.B ABS_HOST
+IP address or hostname to bind the server to.  Empty (default) binds to all
+interfaces (0.0.0.0).
+.TP
+.B ABS_HOSTNAME
+Hostname used in the displayed access URL.  Empty (default) uses the system
+hostname.
+.TP
+.B ABS_PORT
+TCP port to listen on.  Default: 13378.  Must be in 1..65535.
+.TP
+.B ABS_CONFIG_PATH
+Configuration directory, relative to
+.BR ABS_ROOT .
+Default:
+.BR config .
+.TP
+.B ABS_METADATA_PATH
+Metadata directory, relative to
+.BR ABS_ROOT .
+Default:
+.BR metadata .
+.TP
+.BR ABS_FFMPEG ", " ABS_FFPROBE
+Absolute paths to
+.B ffmpeg
+and
+.BR ffprobe .
+Empty (default) auto-detects from
+.BR PATH .
+On Apple Silicon, the script auto-detects to avoid Audiobookshelf\(aqs
+x86_64 download.
+.TP
+.B ABS_SKIP_BINARIES_CHECK
+When set, skip Audiobookshelf\(aqs internal ffmpeg/ffprobe check.  Useful
+when binaries are at non-standard paths.
+.TP
+.B ABS_NUNICODE_PATH
+Absolute path to the nusqlite3 unicode search extension.  Empty (default)
+triggers an automatic download matching the host platform and
+architecture.
+.TP
+.B ABS_ALLOW_IFRAME
+When
+.BR true / 1 ,
+allow Audiobookshelf to be embedded in an iframe (security risk).
+.TP
+.B ABS_BACKUP_PATH
+Backup directory override.  Empty (default) uses Audiobookshelf\(aqs internal
+default.
+.TP
+.B ABS_ROUTER_BASE_PATH
+URL subpath for the web UI.  Default:
+.BR /audiobookshelf .
+Set to the empty string to serve at root.
+.TP
+.B ABS_REACT_CLIENT_PATH
+Path to an experimental React client build (development feature).
+.TP
+.B ABS_ALLOW_CORS
+When
+.BR 1 / true ,
+allow cross-origin requests.
+.TP
+.B ABS_SSRF_WHITELIST
+Comma-separated list of hosts/CIDRs allowed past the SSRF filter.
+.TP
+.B ABS_DISABLE_SSRF
+When
+.BR 1 / true ,
+disable the SSRF filter entirely (security risk).
+.TP
+.B ABS_JWT_SECRET
+JWT signing key.  Empty (default) lets Audiobookshelf auto-generate one.
+At least 32 characters recommended.
+.TP
+.B ABS_RUNTIME
+Runtime selection:
+.BR node ,
+.BR bun ,
+or an absolute path to a binary.  Empty (default) prompts on first run and
+persists the choice to
+.IR $ABS_ROOT/.runtime .
+.IP
+If
+.B bun
+is selected and not installed, the script offers to run Bun\(aqs official
+installer after explicit user consent.
+If
+.B node
+is selected and not installed, the script prints platform-appropriate
+install instructions and exits; Node.js is never auto-installed.
+.TP
+.B ABS_AUTO_UPDATE
+When
+.B true
+(default), every
+.BR start / restart / foreground
+pulls upstream changes first.  Override per-run with
+.B \-\-update
+or
+.BR \-\-no\-update .
+.TP
+.B ABS_LOG_ROTATE
+Log rotation threshold.  Accepts:
+.RS
+.IP \(bu 2
+A bare number, interpreted as megabytes (e.g.
+.BR 50 ).
+.IP \(bu 2
+A size with unit:
+.BR K / KB / KiB ,
+.BR M / MB / MiB ,
+.BR G / GB / GiB
+(e.g.
+.BR 100M ,
+.BR 1G ).
+Units are case-insensitive and binary (powers of 1024).
+.IP \(bu 2
+An age in days (e.g.
+.BR 30d ).
+Rotates when the active log file is older than N days.
+.RE
+.IP
+Only the active log is rotated, to
+.IR audiobookshelf.log.1 .
+Any existing
+.B .1
+file is overwritten (single-generation rotation).
+Default:
+.BR 50M .
+.TP
+.B ABS_BUN_SQLITE_REBUILD
+Controls when the script rebuilds the
+.B sqlite3
+native binding under the Bun runtime (see the
+.B rebuild\-sqlite
+command).  Values:
+.RS
+.IP \(bu 2
+.B auto
+(default): rebuild only if
+.I node_sqlite3.node
+is missing after
+.BR "bun install" .
+.IP \(bu 2
+.BR always :
+rebuild on every install regardless.
+.IP \(bu 2
+.BR never :
+do nothing; warn if the binding is missing.
+.RE
+.IP
+Ignored under Node.js (where
+.B npm install
+builds the binding natively).
+.TP
+.B ABS_DEBUG
+If set to a non-empty, non-zero value, enables shell xtrace
+.RB ( "set -o xtrace" )
+for the duration of the run.  Equivalent to passing
+.B \-\-debug
+on the command line.  Useful for troubleshooting unexpected behavior;
+output goes to stderr and is verbose.  Default: unset.
+.SH FILES
+.TP
+.I $ABS_ROOT/audiobookshelf/
+Cloned Audiobookshelf source tree.
+.TP
+.I $ABS_ROOT/audiobookshelf.pid
+Daemon PID file.
+.TP
+.I $ABS_ROOT/audiobookshelf.log
+Daemon log (created on first daemon start).
+.TP
+.I $ABS_ROOT/audiobookshelf.log.1
+Previous log after rotation.
+.TP
+.I $ABS_ROOT/.runtime
+Persisted runtime choice (absolute path to
+.B node
+or
+.BR bun ).
+.TP
+.I $ABS_ROOT/.runabs.lock
+Per-installation lock directory.  Removed automatically on exit.
+.TP
+.I $ABS_ROOT/.env
+Directory-local configuration (overridden by environment).
+.TP
+.I ~/.env_abs
+User-global configuration.
+.TP
+.I ~/Library/LaunchAgents/org.audiobookshelf.server.plist
+launchd service definition (macOS).
+.TP
+.I ~/.config/systemd/user/audiobookshelf.service
+systemd user unit (Linux).
+.TP
+.I ~/.audiobookshelf-autostart.sh
+Generic crontab wrapper script.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Generic error: invalid argument, validation failure, missing dependency,
+daemon failed to start, or service already installed.
+.TP
+.B 129
+Hung up (SIGHUP).
+.TP
+.B 130
+Interrupted (SIGINT, e.g. Ctrl+C).
+.TP
+.B 143
+Terminated (SIGTERM).
+.SH EXAMPLES
+.PP
+Run in foreground for the first time, to see each setup step:
+.PP
+.RS 4
+.nf
+runabs.sh foreground
+.fi
+.RE
+.PP
+Start as a daemon on a non-default port:
+.PP
+.RS 4
+.nf
+ABS_PORT=8080 runabs.sh start
+.fi
+.RE
+.PP
+Write a configuration template and edit it:
+.PP
+.RS 4
+.nf
+runabs.sh init\-config
+$EDITOR \fI$HOME/audiobookshelf/.env\fR
+.fi
+.RE
+.PP
+Install the platform autostart service:
+.PP
+.RS 4
+.nf
+runabs.sh install\-service
+.fi
+.RE
+.PP
+Restart after pulling upstream changes:
+.PP
+.RS 4
+.nf
+runabs.sh restart \-\-update
+.fi
+.RE
+.PP
+Rotate logs by age instead of size, with output in JSON-friendly form:
+.PP
+.RS 4
+.nf
+ABS_LOG_ROTATE=30d runabs.sh check\-config
+.fi
+.RE
+.PP
+Override a runtime, persisting the choice:
+.PP
+.RS 4
+.nf
+ABS_RUNTIME=bun runabs.sh start
+.fi
+.RE
+.SH AUTOSTART SERVICE
+The
+.B install\-service
+command installs a service appropriate to the operating system:
+.IP \(bu 4
+macOS: a launchd
+.B LaunchAgent
+at
+.IR ~/Library/LaunchAgents/org.audiobookshelf.server.plist .
+.IP \(bu 4
+Linux (with systemd available): a systemd user unit at
+.IR ~/.config/systemd/user/audiobookshelf.service .
+Manage with
+.BR "systemctl --user {start|stop|status} audiobookshelf" .
+.IP \(bu 4
+Other platforms (or Linux without systemd): a POSIX wrapper at
+.I ~/.audiobookshelf\-autostart.sh
+registered as a
+.B @reboot
+entry in the user\(aqs crontab.
+.PP
+The chosen runtime path and the
+.B ABS_AUTO_UPDATE
+value at install time are baked into the service definition.  Changes to
+.B .env
+files are picked up at the next service start; changes to the runtime
+require
+.B uninstall\-service
+followed by
+.BR install\-service .
+.SH DIAGNOSTICS
+The
+.B check\-config
+command is the primary diagnostic tool.  It validates every configuration
+variable and reports per-section status with clear symbols
+(\fB[OK]\fR, \fB[!]\fR, \fB[ERR]\fR, \fB[->]\fR), exiting non-zero on
+failure.
+.PP
+On daemon startup, the script polls for 5 seconds.  If the process dies
+within that window, the last 20 log lines are dumped to stderr and the
+script exits 1.  This catches port conflicts, missing dependencies, and
+configuration errors that survive validation.
+.SH SECURITY
+The script generates a Node.js configuration file
+.RB ( dev.js )
+that embeds configuration values as single-quoted JS literals.  All string
+values are validated to reject single quotes, double quotes, backslashes,
+and newlines before generation.  Path values are validated to be absolute.
+Boolean values are validated against a fixed set.  Hostnames are validated
+against RFC 1123 syntax; IP addresses against strict IPv4/IPv6 patterns
+(IPv4 rejects leading zeros to prevent octal interpretation).
+.PP
+Runtime installation is asymmetric.
+.B Bun
+can be installed by the script via Bun\(aqs official
+.B curl|bash
+installer, but only after explicit consent at an interactive prompt;
+non-TTY runs with Bun missing fail with manual installation instructions.
+.B Node.js
+is
+.I never
+auto-installed; if selected and missing, the script prints
+platform-appropriate install instructions and exits.
+.PP
+The script never modifies system files outside of
+.B ABS_ROOT
+and the user-scoped service directories listed under
+.BR FILES .
+.SH PORTABILITY
+The script targets strict POSIX shell.  Features used only when available:
+.IP \(bu 4
+.B set \-o pipefail
+is enabled when supported and silently skipped on shells without it
+(e.g. strict POSIX
+.BR posh ).
+.IP \(bu 4
+.B readlink
+is used for symlink resolution if present; otherwise the script falls back
+to direct path resolution.
+.IP \(bu 4
+Network IP detection uses
+.BR route / ipconfig
+on macOS,
+.BR ip / ifconfig / "hostname \-I"
+on Linux, with graceful degradation if none is available.
+.IP \(bu 4
+Port-in-use detection uses
+.BR lsof ,
+.BR ss ,
+or
+.BR netstat
+in that order.
+.SH BUGS
+This script is independent of and unaffiliated with the Audiobookshelf
+project.
+.PP
+Bugs in
+.B runabs.sh
+itself, this man page, or the bundled documentation should be reported
+at
+.UR https://github.com/katertier/runabs/issues
+.UE .
+For security-sensitive reports, open a private advisory at
+.UR https://github.com/katertier/runabs/security/advisories/new
+.UE
+instead.
+.PP
+Bugs in Audiobookshelf itself (the server, the web client, the mobile
+apps) belong with the upstream project at
+.UR https://github.com/advplyr/audiobookshelf/issues
+.UE .
+The runabs.sh team did not write the server and cannot fix server bugs.
+.PP
+This script is distributed under the GNU General Public License version
+3 or later, with no warranty of any kind.
+.SH SEE ALSO
+.BR git (1),
+.BR systemctl (1),
+.BR launchctl (1),
+.BR crontab (1),
+.BR ffmpeg (1)
+.PP
+.UR https://www.audiobookshelf.org
+.UE
+\(em project home page.
+.PP
+.UR https://www.audiobookshelf.org/docs#env-configuration
+.UE
+\(em upstream environment variable reference.

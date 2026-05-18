@@ -1,0 +1,35 @@
+# shellcheck configuration for runabs.sh
+#
+# This file is honored by `shellcheck` automatically when run from the
+# directory containing it, so anyone running plain `shellcheck runabs.sh`
+# (not via Make) gets the same checks the project ships with.
+# IDE integrations (VS Code, vim-ale, etc.) also pick it up.
+
+# Shell dialect: strict POSIX sh, not bash.
+shell=sh
+
+# Suppressions, with rationale:
+#
+# SC3040 - "set -o pipefail is undefined in sh"
+#   The script falls back gracefully when pipefail is unsupported via:
+#     (set -o pipefail) 2>/dev/null && set -o pipefail || true
+#   The runtime check covers what shellcheck cannot statically verify.
+#
+# SC2015 - "A && B || C is not if-then-else"
+#   Used intentionally as a guard pattern in places where the false branch
+#   is unconditional logging or cleanup, never a value-producing path.
+#
+# SC2034 - "var appears unused"
+#   Triggered by the readonly constants block; values are exported to
+#   subshells (env files, the wrapper scripts we generate, etc.) where
+#   shellcheck can't follow them.
+#
+# SC2154 - "var is referenced but not assigned"
+#   Triggered by ABS_* variables that may legitimately be unset at parse
+#   time; the runtime ${VAR:-default} expansion handles them.
+#
+# SC2129 - "Consider using { cmd1; cmd2; } >> file"
+#   In write_dev_js_config_file we deliberately use one printf per line
+#   so each generated config field stays grep-friendly. The "redundant"
+#   redirects are intentional.
+disable=SC3040,SC2015,SC2034,SC2154,SC2129

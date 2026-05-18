@@ -1,0 +1,29 @@
+# Build artifacts produced by `make dist`
+runabs-*.tar.gz
+runabs-*/
+
+# Editor / OS clutter
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Local configuration (often contains paths or secrets the user
+# wouldn't want to commit)
+.env
+.env_abs
+.env.local
+
+# Audiobookshelf checkout if a user happens to set ABS_ROOT to
+# the dist directory itself (not recommended, but possible). Anchored
+# with a leading slash so we only ignore an audiobookshelf/ directory
+# at the dist root, not arbitrary subdirectories someone might create
+# for testing.
+/audiobookshelf/
+
+# Runtime state if ABS_ROOT lives here
+*.log
+*.log.1
+.runabs.lock
+.runtime
+.first-run-shown
