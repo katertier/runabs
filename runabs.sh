@@ -104,7 +104,7 @@ ABS_BUN_SQLITE_REBUILD="${ABS_BUN_SQLITE_REBUILD:-auto}"
 # =============================================================================
 # IMMUTABLE CONSTANTS
 # =============================================================================
-ABS_RUN_VERSION="4.0"
+ABS_RUN_VERSION="4.0.1"
 readonly ABS_RUN_VERSION
 
 LAUNCHD_LABEL="org.audiobookshelf.server"
