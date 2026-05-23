@@ -104,7 +104,7 @@ ABS_BUN_SQLITE_REBUILD="${ABS_BUN_SQLITE_REBUILD:-auto}"
 # =============================================================================
 # IMMUTABLE CONSTANTS
 # =============================================================================
-ABS_RUN_VERSION="4.0.1"
+ABS_RUN_VERSION="4.0.2"
 readonly ABS_RUN_VERSION
 
 LAUNCHD_LABEL="org.audiobookshelf.server"
@@ -2811,6 +2811,8 @@ EndOfDevConfig
 write_bun_socket_io_patch_file() {
   cat > socket.io-patch.js << 'EndOfPatch'
 // Bun: disable Socket.IO long-polling (not supported in Bun's HTTP server).
+// Also disable transport upgrades and tune ping settings to reduce
+// reconnect loops caused by Bun/WebSocket handshake quirks.
 // Runtime patch; no upstream source is modified.
 const Module = require('module');
 const originalRequire = Module.prototype.require;
@@ -2823,6 +2825,9 @@ Module.prototype.require = function(id) {
     Server.prototype.listen = function() {
       if (!this.opts) this.opts = {};
       this.opts.transports = ['websocket'];
+      this.opts.allowUpgrades = false;
+      this.opts.pingTimeout = 60000;
+      this.opts.pingInterval = 30000;
       return origListen.apply(this, arguments);
     };
   }
@@ -2993,12 +2998,24 @@ export_abs_env_only_variables_to_runtime() {
 # Called by:   main (foreground command)
 # -----------------------------------------------------------------------------
 run_audiobookshelf_in_foreground() {
-  printf 'Starting Audiobookshelf in foreground (with file watch)...\n'
+  if [ "$DEV_MODE" = "true" ]; then
+    printf 'Starting Audiobookshelf in foreground (with file watch)...\n'
+  else
+    printf 'Starting Audiobookshelf in foreground...\n'
+  fi
   print_access_information_block
   if [ "$RUNTIME_FAMILY" = "bun" ]; then
-    "$RUNTIME_BIN" --watch socket.io-patch.js -- "$MODE_ARG"
+    if [ "$DEV_MODE" = "true" ]; then
+      exec "$RUNTIME_BIN" --watch socket.io-patch.js -- "$MODE_ARG"
+    else
+      "$RUNTIME_BIN" socket.io-patch.js -- "$MODE_ARG"
+    fi
   else
-    "$RUNTIME_BIN" --watch index.js "$MODE_ARG"
+    if [ "$DEV_MODE" = "true" ]; then
+      exec "$RUNTIME_BIN" --watch index.js "$MODE_ARG"
+    else
+      "$RUNTIME_BIN" index.js "$MODE_ARG"
+    fi
   fi
 }
 
