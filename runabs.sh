@@ -104,7 +104,7 @@ ABS_BUN_SQLITE_REBUILD="${ABS_BUN_SQLITE_REBUILD:-auto}"
 # =============================================================================
 # IMMUTABLE CONSTANTS
 # =============================================================================
-ABS_RUN_VERSION="4.0.2"
+ABS_RUN_VERSION="4.0.3"
 readonly ABS_RUN_VERSION
 
 LAUNCHD_LABEL="org.audiobookshelf.server"
@@ -2811,8 +2811,8 @@ EndOfDevConfig
 write_bun_socket_io_patch_file() {
   cat > socket.io-patch.js << 'EndOfPatch'
 // Bun: disable Socket.IO long-polling (not supported in Bun's HTTP server).
-// Also disable transport upgrades and tune ping settings to reduce
-// reconnect loops caused by Bun/WebSocket handshake quirks.
+// Force the 'ws' library instead of Bun's native WebSocket, disable
+// compression, and tune ping settings to eliminate reconnect loops.
 // Runtime patch; no upstream source is modified.
 const Module = require('module');
 const originalRequire = Module.prototype.require;
@@ -2826,6 +2826,8 @@ Module.prototype.require = function(id) {
       if (!this.opts) this.opts = {};
       this.opts.transports = ['websocket'];
       this.opts.allowUpgrades = false;
+      this.opts.perMessageDeflate = false;
+      this.opts.wsEngine = 'ws';
       this.opts.pingTimeout = 60000;
       this.opts.pingInterval = 30000;
       return origListen.apply(this, arguments);
