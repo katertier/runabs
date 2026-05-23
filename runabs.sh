@@ -607,12 +607,26 @@ strip_ansi_escape_sequences() (
 # Called by:   main (state-mutating commands)
 # -----------------------------------------------------------------------------
 acquire_run_lock_or_exit() {
+  if [ -d "$LOCK_DIR" ]; then
+    if [ -f "$LOCK_DIR/pid" ]; then
+      lock_holder_pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+      if [ -n "$lock_holder_pid" ] && kill -0 "$lock_holder_pid" 2>/dev/null; then
+        printf '%s\n' "$(color_in_red "Another $SCRIPT_NAME instance is running against $ABS_ROOT.")"
+        printf '  Lock: %s (PID: %s)\n' "$LOCK_DIR" "$lock_holder_pid"
+        printf '  If this is stale, remove it: rm -rf %s\n' "$LOCK_DIR"
+        exit 1
+      fi
+    fi
+    # Stale lock — holder is dead or file is missing.
+    rm -rf "$LOCK_DIR"
+  fi
   if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     printf '%s\n' "$(color_in_red "Another $SCRIPT_NAME instance is running against $ABS_ROOT.")"
     printf '  Lock: %s\n' "$LOCK_DIR"
     printf '  If this is stale, remove it: rm -rf %s\n' "$LOCK_DIR"
     exit 1
   fi
+  printf '%s\n' "$$" > "$LOCK_DIR/pid"
 }
 
 # -----------------------------------------------------------------------------
@@ -1468,7 +1482,7 @@ print_access_information_block() {
   printf 'Access URL: %s\n' "$(color_in_blue "$hostname_based_url")"
   ip_based_url="$(build_access_url_via_ip || true)"
   if [ -n "$ip_based_url" ] && [ "$ip_based_url" != "$hostname_based_url" ]; then
-    printf '  (or via IP: %s)\n' "$(color_in_blue "$ip_based_url")"
+    printf '   IP URL:  %s\n' "$(color_in_blue "$ip_based_url")"
   fi
   printf '%s\n' "$(color_in_bold "========================================")"
 }
@@ -2253,7 +2267,7 @@ warn_if_port_is_in_use_by_other_process() {
   # awk is used rather than `grep -o` because grep's -o flag is a
   # GNU/BSD extension, not POSIX. awk's match()/substr() are POSIX.
   if command -v lsof >/dev/null 2>&1; then
-    pids_listening_on_port="$(lsof -ti :"$ABS_PORT" 2>/dev/null || true)"
+    pids_listening_on_port="$(lsof -ti TCP:"$ABS_PORT" -sTCP:LISTEN 2>/dev/null || true)"
   elif command -v ss >/dev/null 2>&1; then
     pids_listening_on_port="$(ss -tlnp 2>/dev/null \
       | awk -v port=":$ABS_PORT " '
@@ -2727,6 +2741,15 @@ clone_or_update_repo_and_print_progress() {
     fi
     git clone "$ABS_REPO_URL" "$REPO_DIR"
   fi
+
+  # Hide script-generated files from git status so they don't trigger the
+  # "discard local changes?" prompt on every update.
+  if [ -d "$REPO_DIR/.git" ]; then
+    for generated_pattern in "/socket.io-patch.js" "/bun.lock" "/client/bun.lock"; do
+      grep -qxF "$generated_pattern" "$REPO_DIR/.git/info/exclude" 2>/dev/null || \
+        printf '%s\n' "$generated_pattern" >> "$REPO_DIR/.git/info/exclude"
+    done
+  fi
 }
 
 # =============================================================================
@@ -2973,9 +2996,9 @@ run_audiobookshelf_in_foreground() {
   printf 'Starting Audiobookshelf in foreground (with file watch)...\n'
   print_access_information_block
   if [ "$RUNTIME_FAMILY" = "bun" ]; then
-    exec "$RUNTIME_BIN" --watch socket.io-patch.js -- "$MODE_ARG"
+    "$RUNTIME_BIN" --watch socket.io-patch.js -- "$MODE_ARG"
   else
-    exec "$RUNTIME_BIN" --watch index.js "$MODE_ARG"
+    "$RUNTIME_BIN" --watch index.js "$MODE_ARG"
   fi
 }
 
