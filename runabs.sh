@@ -104,7 +104,7 @@ ABS_BUN_SQLITE_REBUILD="${ABS_BUN_SQLITE_REBUILD:-auto}"
 # =============================================================================
 # IMMUTABLE CONSTANTS
 # =============================================================================
-ABS_RUN_VERSION="4.0.3"
+ABS_RUN_VERSION="4.0.4"
 readonly ABS_RUN_VERSION
 
 LAUNCHD_LABEL="org.audiobookshelf.server"
@@ -2811,27 +2811,63 @@ EndOfDevConfig
 write_bun_socket_io_patch_file() {
   cat > socket.io-patch.js << 'EndOfPatch'
 // Bun: disable Socket.IO long-polling (not supported in Bun's HTTP server).
-// Force the 'ws' library instead of Bun's native WebSocket, disable
-// compression, and tune ping settings to eliminate reconnect loops.
+// Intercept the Server constructor to inject websocket-only settings,
+// because modern Socket.IO passes options to new Server() instead
+// of .listen(). Also force the 'ws' library to avoid Bun native WS bugs.
 // Runtime patch; no upstream source is modified.
 const Module = require('module');
 const originalRequire = Module.prototype.require;
 
+function forceWebsocketOpts(args) {
+  // Socket.IO constructor signatures:
+  //   new Server(port, opts)     -> opts is 2nd arg
+  //   new Server(server, opts)   -> opts is 2nd arg
+  //   new Server(opts)           -> opts is 1st arg
+  let optsIdx;
+  if (args.length === 0) {
+    args.push({});
+    optsIdx = 0;
+  } else if (typeof args[0] === 'number' || typeof args[0] === 'string') {
+    optsIdx = 1;
+  } else if (args[0] && typeof args[0].listen === 'function') {
+    optsIdx = 1;
+  } else {
+    optsIdx = 0;
+  }
+  if (!args[optsIdx]) args[optsIdx] = {};
+  const opts = args[optsIdx];
+  opts.transports = ['websocket'];
+  opts.allowUpgrades = false;
+  opts.perMessageDeflate = false;
+  opts.wsEngine = 'ws';
+  opts.pingTimeout = 60000;
+  opts.pingInterval = 30000;
+}
+
 Module.prototype.require = function(id) {
   const mod = originalRequire.apply(this, arguments);
   if (id === 'socket.io' || id.endsWith('/socket.io')) {
-    const Server = mod.Server || mod;
-    const origListen = Server.prototype.listen;
-    Server.prototype.listen = function() {
-      if (!this.opts) this.opts = {};
-      this.opts.transports = ['websocket'];
-      this.opts.allowUpgrades = false;
-      this.opts.perMessageDeflate = false;
-      this.opts.wsEngine = 'ws';
-      this.opts.pingTimeout = 60000;
-      this.opts.pingInterval = 30000;
-      return origListen.apply(this, arguments);
-    };
+    const OriginalServer = mod.Server || mod;
+
+    function PatchedServer(...args) {
+      forceWebsocketOpts(args);
+      const instance = new OriginalServer(...args);
+      return instance;
+    }
+
+    // Preserve prototype chain and static properties
+    Object.setPrototypeOf(PatchedServer, OriginalServer);
+    PatchedServer.prototype = OriginalServer.prototype;
+    for (const key of Object.getOwnPropertyNames(OriginalServer)) {
+      if (key !== 'length' && key !== 'name' && key !== 'prototype') {
+        try {
+          PatchedServer[key] = OriginalServer[key];
+        } catch (_) {}
+      }
+    }
+    Object.defineProperty(PatchedServer, 'name', { value: 'Server' });
+
+    mod.Server = PatchedServer;
   }
   return mod;
 };
