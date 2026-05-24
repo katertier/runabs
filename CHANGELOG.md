@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [4.0.5] — 2026-05-24
+
+### Fixed
+
+- Bun: stop the Socket.IO "connected → transport close → reconnect" loop that
+  appears whenever ABS runs under a `RouterBasePath` (the default
+  `/audiobookshelf`). ABS opens a second Socket.IO server for the base path, so
+  both engine.io instances see every WebSocket upgrade. Under Bun,
+  `socket.bytesWritten` is not tracked on upgraded sockets, so the non-matching
+  server's stray-upgrade cleanup (`destroyUpgradeTimeout`, default 1000 ms)
+  wrongly ended the live connection after ~1 s. The Bun `socket.io-patch.js` now
+  forces `destroyUpgrade: false`, which applies to both servers via the
+  constructor wrap. The Node runtime is unaffected.
+- Bun: removed the no-op `wsEngine: 'ws'` string from the patch — engine.io v6
+  expects a constructor, not a module name, and `ws` is already the default.
+
 ## [4.0] — 2026-05
 
 Initial public release.
@@ -88,4 +104,5 @@ release.
   CLI as an alternative to Docker Desktop.
 - GPL-3.0-or-later license file (verbatim).
 
+[4.0.5]: https://github.com/katertier/runabs/releases/tag/v4.0.5
 [4.0]: https://github.com/katertier/runabs/releases/tag/v4.0

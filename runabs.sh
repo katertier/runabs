@@ -104,7 +104,7 @@ ABS_BUN_SQLITE_REBUILD="${ABS_BUN_SQLITE_REBUILD:-auto}"
 # =============================================================================
 # IMMUTABLE CONSTANTS
 # =============================================================================
-ABS_RUN_VERSION="4.0.4"
+ABS_RUN_VERSION="4.0.5"
 readonly ABS_RUN_VERSION
 
 LAUNCHD_LABEL="org.audiobookshelf.server"
@@ -2810,10 +2810,12 @@ EndOfDevConfig
 # -----------------------------------------------------------------------------
 write_bun_socket_io_patch_file() {
   cat > socket.io-patch.js << 'EndOfPatch'
-// Bun: disable Socket.IO long-polling (not supported in Bun's HTTP server).
-// Intercept the Server constructor to inject websocket-only settings,
-// because modern Socket.IO passes options to new Server() instead
-// of .listen(). Also force the 'ws' library to avoid Bun native WS bugs.
+// Bun Socket.IO fixes. Intercept the Server constructor (modern Socket.IO passes
+// options to new Server(), not .listen()) to inject Bun-safe engine.io options:
+//   - websocket-only transport (Bun's HTTP server long-polling is unreliable)
+//   - destroyUpgrade:false, which stops Bun's missing socket.bytesWritten from
+//     letting engine.io's stray-upgrade cleanup kill live connections after ~1s
+//     when ABS runs more than one Socket.IO server (RouterBasePath subpath).
 // Runtime patch; no upstream source is modified.
 const Module = require('module');
 const originalRequire = Module.prototype.require;
@@ -2839,9 +2841,17 @@ function forceWebsocketOpts(args) {
   opts.transports = ['websocket'];
   opts.allowUpgrades = false;
   opts.perMessageDeflate = false;
-  opts.wsEngine = 'ws';
   opts.pingTimeout = 60000;
   opts.pingInterval = 30000;
+  // The real Bun fix: ABS opens a second Socket.IO server when RouterBasePath is
+  // set, so both engine.io instances see every upgrade. The non-matching one
+  // arms engine.io's stray-upgrade cleanup (destroyUpgradeTimeout, default
+  // 1000ms), which only no-ops on Node because it checks socket.bytesWritten > 0.
+  // Bun doesn't track bytesWritten on upgraded sockets, so the guard is wrongly
+  // true and the live connection is ended at ~1s ("transport close" loop).
+  // Disabling the cleanup makes the dual-server (reverse-proxy subpath) setup
+  // stable under Bun; harmless because ABS only serves known socket.io paths.
+  opts.destroyUpgrade = false;
 }
 
 Module.prototype.require = function(id) {
