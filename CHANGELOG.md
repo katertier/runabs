@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [4.0.6] — 2026-05-24
+
+### Fixed
+
+- Daemon start no longer reports a false "Daemon died within N seconds" when ABS
+  actually started. The startup health check now uses a POSIX `kill -0` liveness
+  probe, and daemon identification (`status`/`stop`/`restart`) is done primarily
+  by checking which PID is bound to the port — portable and truncation-proof —
+  instead of matching `$REPO_DIR` in `ps -o args=` (which never matched the
+  relatively-launched daemon and can be truncated on the BSDs). This also fixes
+  `stop`/`restart` failing to find the daemon, which left orphaned processes and
+  caused spurious port conflicts.
+- Port-conflict handling: when the port is in use, runabs now identifies the
+  offending process (PID + command) and, interactively, offers to stop it
+  (SIGTERM then SIGKILL), verifying the port is freed before continuing.
+  Non-interactive contexts abort cleanly with guidance instead of letting ABS
+  crash with an `EADDRINUSE` stack trace. Port detection now also covers the BSDs
+  (`sockstat`) and Linux `fuser`, in addition to lsof/ss/netstat.
+- Runtime detection now finds Bun (and Node) in well-known off-PATH locations
+  (`$BUN_INSTALL/bin`, `~/.bun/bin`, Homebrew dirs), so Bun-based autostart via
+  launchd/systemd/cron no longer fails with "Bun is not installed" when
+  `~/.bun/bin` is not on the service's PATH.
+
 ## [4.0.5] — 2026-05-24
 
 ### Fixed
@@ -104,5 +127,6 @@ release.
   CLI as an alternative to Docker Desktop.
 - GPL-3.0-or-later license file (verbatim).
 
+[4.0.6]: https://github.com/katertier/runabs/releases/tag/v4.0.6
 [4.0.5]: https://github.com/katertier/runabs/releases/tag/v4.0.5
 [4.0]: https://github.com/katertier/runabs/releases/tag/v4.0

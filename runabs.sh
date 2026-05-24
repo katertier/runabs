@@ -104,7 +104,7 @@ ABS_BUN_SQLITE_REBUILD="${ABS_BUN_SQLITE_REBUILD:-auto}"
 # =============================================================================
 # IMMUTABLE CONSTANTS
 # =============================================================================
-ABS_RUN_VERSION="4.0.5"
+ABS_RUN_VERSION="4.0.6"
 readonly ABS_RUN_VERSION
 
 LAUNCHD_LABEL="org.audiobookshelf.server"
@@ -876,8 +876,29 @@ resolve_runtime_to_absolute_path() (
       printf '%s\n' "$runtime_spec"
       ;;
     node|bun)
-      command -v "$runtime_spec" >/dev/null 2>&1 || return 1
-      command -v "$runtime_spec"
+      # Prefer PATH, then fall back to well-known install locations so the
+      # runtime is found in non-interactive contexts (launchd/systemd/cron),
+      # where ~/.bun/bin and Homebrew dirs are typically not on PATH. This
+      # mirrors the off-PATH ffmpeg auto-detection.
+      if command -v "$runtime_spec" >/dev/null 2>&1; then
+        command -v "$runtime_spec"
+        return 0
+      fi
+      if [ -n "${BUN_INSTALL:-}" ] && [ -x "$BUN_INSTALL/bin/$runtime_spec" ]; then
+        printf '%s\n' "$BUN_INSTALL/bin/$runtime_spec"
+        return 0
+      fi
+      for runtime_candidate_path in \
+        "$HOME/.bun/bin/$runtime_spec" \
+        "/opt/homebrew/bin/$runtime_spec" \
+        "/usr/local/bin/$runtime_spec" \
+        "/home/linuxbrew/.linuxbrew/bin/$runtime_spec"; do
+        if [ -x "$runtime_candidate_path" ]; then
+          printf '%s\n' "$runtime_candidate_path"
+          return 0
+        fi
+      done
+      return 1
       ;;
     *)
       return 1
@@ -914,19 +935,19 @@ prompt_user_for_runtime_choice_and_print_result() {
     exit 1
   fi
 
-  node_installation_status=""
-  bun_installation_status=""
-  command -v node >/dev/null 2>&1 && node_installation_status="yes"
-  command -v bun  >/dev/null 2>&1 && bun_installation_status="yes"
+  # Detect via the resolver so off-PATH installs (~/.bun/bin, Homebrew) are
+  # reported correctly, not just what is currently on PATH.
+  node_path="$(resolve_runtime_to_absolute_path node 2>/dev/null || true)"
+  bun_path="$(resolve_runtime_to_absolute_path bun 2>/dev/null || true)"
 
   printf '\n%s\n' "$(color_in_bold "Choose a JavaScript runtime:")" >&2
-  if [ -n "$node_installation_status" ]; then
-    printf '  1) %s   %s\n' "$(color_in_yellow "node")" "$(get_runtime_version_string "$(command -v node)")" >&2
+  if [ -n "$node_path" ]; then
+    printf '  1) %s   %s\n' "$(color_in_yellow "node")" "$(get_runtime_version_string "$node_path")" >&2
   else
     printf '  1) %s   not installed (install yourself, then re-run)\n' "$(color_in_yellow "node")" >&2
   fi
-  if [ -n "$bun_installation_status" ]; then
-    printf '  2) %s    %s\n' "$(color_in_yellow "bun")" "$(get_runtime_version_string "$(command -v bun)")" >&2
+  if [ -n "$bun_path" ]; then
+    printf '  2) %s    %s\n' "$(color_in_yellow "bun")" "$(get_runtime_version_string "$bun_path")" >&2
   else
     printf '  2) %s    not installed (this script can install it with your consent)\n' "$(color_in_yellow "bun")" >&2
   fi
@@ -2146,7 +2167,7 @@ print_help_screen() {
 # Description: Reads the daemon PID from $PID_FILE (empty if absent).
 # Inputs:      global: PID_FILE
 # Outputs:     stdout: PID or empty
-# Called by:   stop/restart, main (status), warn_if_port_is_in_use_by_other_process
+# Called by:   stop/restart, main (status), resolve_port_conflict_or_exit
 # -----------------------------------------------------------------------------
 read_daemon_pid_from_file() (
   if [ -f "$PID_FILE" ]; then
@@ -2177,22 +2198,27 @@ pid_is_our_running_daemon() (
     *) return 1 ;;
   esac
 
-  # Second check: the full command line should reference our REPO_DIR.
-  # This guards against PID reuse - the kernel may have assigned this PID
-  # to an unrelated node or bun process after our daemon exited. Without
-  # this check, status/stop would act on the wrong process.
+  # Second check: confirm this PID is really ours (not a recycled PID now
+  # belonging to an unrelated node/bun process).
   #
-  # `ps -o args=` is widely portable (POSIX), and we use grep -F (fixed
-  # string) to avoid any regex interpretation of REPO_DIR's path.
+  # Strongest, truncation-proof signal that works on every supported OS: is this
+  # exact PID the process bound to ABS_PORT? Our daemon owns that port; an
+  # unrelated recycled PID almost certainly does not. This avoids relying on
+  # `ps -o args=`, which some BSDs truncate at a small fixed width (COMMAND_MAX).
+  for one_bound_pid in $(list_pids_listening_on_abs_port); do
+    [ "$one_bound_pid" = "$candidate_pid" ] && return 0
+  done
+
+  # Fallback to the command line for the brief window before the daemon binds
+  # the port (and the unlikely case where no port tool is installed). `ps -o
+  # args=` is POSIX; case matching avoids any regex interpretation of the path.
   process_command_line="$(ps -p "$candidate_pid" -o args= 2>/dev/null || true)"
   case "$process_command_line" in
-    *"$REPO_DIR"*) return 0 ;;
+    *"$REPO_DIR"*) return 0 ;;          # full path visible (untruncated args)
+    *socket.io-patch.js*) return 0 ;;   # bun entrypoint (runabs-unique name)
     *)
-      # Some BSDs truncate `ps -o args=` output at a small fixed width
-      # (e.g. COMMAND_MAX). If the full path isn't visible, fall back to
-      # accepting the node/bun match alone rather than producing a false
-      # negative. Users with multiple ABS instances on truncating
-      # platforms get a less-precise check, which is acceptable.
+      # Args truncated below usefulness: accept the node/bun match rather than
+      # produce a false negative.
       if [ ${#process_command_line} -lt 40 ]; then
         return 0
       fi
@@ -2246,30 +2272,29 @@ gracefully_stop_pid_with_sigkill_fallback() {
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# Description: Warns if ABS_PORT is in use by a process other than our daemon.
-# Inputs:      globals: ABS_PORT, SCRIPT_NAME, PID_FILE
-# Outputs:     stdout: warning on conflict
-# Called by:   main (just before launch)
+# Description: Prints PIDs (one per line) listening on ABS_PORT, or nothing.
+#              Uses whichever of lsof/ss/sockstat/fuser/netstat is available,
+#              covering macOS, Linux, and the BSDs (BSD netstat lacks PIDs, so
+#              sockstat is the BSD fallback).
+#
+#              awk is used rather than `grep -o` because grep's -o flag is a
+#              GNU/BSD extension, not POSIX. awk's match()/substr() are POSIX.
+#              The structured fields each tool emits:
+#                - ss -tlnp:      users:(("name",pid=12345,fd=20))
+#                - netstat -tlnp: ... LISTEN  12345/process_name
+#
+#              Caveat: without elevated privileges these tools may not reveal
+#              PIDs owned by OTHER users, so a port held by another user can go
+#              undetected (same limitation as the original check).
+# Inputs:      global: ABS_PORT
+# Outputs:     stdout: PIDs, one per line
+# Called by:   resolve_port_conflict_or_exit
 # -----------------------------------------------------------------------------
-warn_if_port_is_in_use_by_other_process() {
-  pids_listening_on_port=""
-  our_daemon_pid="$(read_daemon_pid_from_file)"
-
-  # Extract PIDs only. `lsof -ti` gives one PID per line. `ss`/`netstat`
-  # output is a free-form line with non-PID fields, so we extract the
-  # numeric PID from the structured fields each tool emits:
-  #   - ss -tlnp:       users:(("name",pid=12345,fd=20))
-  #   - netstat -tlnp:  ... LISTEN  12345/process_name
-  # Without explicit extraction, the for-loop below would iterate over
-  # arbitrary whitespace-separated tokens and falsely flag every line
-  # as a conflict.
-  #
-  # awk is used rather than `grep -o` because grep's -o flag is a
-  # GNU/BSD extension, not POSIX. awk's match()/substr() are POSIX.
+list_pids_listening_on_abs_port() {
   if command -v lsof >/dev/null 2>&1; then
-    pids_listening_on_port="$(lsof -ti TCP:"$ABS_PORT" -sTCP:LISTEN 2>/dev/null || true)"
+    lsof -ti TCP:"$ABS_PORT" -sTCP:LISTEN 2>/dev/null || true
   elif command -v ss >/dev/null 2>&1; then
-    pids_listening_on_port="$(ss -tlnp 2>/dev/null \
+    ss -tlnp 2>/dev/null \
       | awk -v port=":$ABS_PORT " '
           index($0, port) > 0 {
             n = split($0, parts, "pid=")
@@ -2279,10 +2304,22 @@ warn_if_port_is_in_use_by_other_process() {
               }
             }
           }' \
-      | sort -u || true)"
+      | sort -u || true
+  elif command -v sockstat >/dev/null 2>&1; then
+    # FreeBSD/OpenBSD/NetBSD: PID is column 3. Match the listening local address
+    # ":PORT", anchored (trailing space or EOL) so ":3333" doesn't match ":33330".
+    sockstat -l 2>/dev/null \
+      | awk -v p=":$ABS_PORT" '
+          ($3 ~ /^[0-9]+$/) && (index($0, p " ") > 0 || $0 ~ (p "$")) { print $3 }' \
+      | sort -u || true
+  elif command -v fuser >/dev/null 2>&1; then
+    # Linux (psmisc): prints the PIDs using the socket to stdout.
+    fuser "$ABS_PORT/tcp" 2>/dev/null \
+      | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+$/) print $i }' \
+      | sort -u || true
   elif command -v netstat >/dev/null 2>&1; then
     # GNU netstat shows "12345/node"; BSD netstat does not show PIDs at all.
-    pids_listening_on_port="$(netstat -tlnp 2>/dev/null \
+    netstat -tlnp 2>/dev/null \
       | awk -v port=":$ABS_PORT " '
           index($0, port) > 0 {
             for (i = 1; i <= NF; i++) {
@@ -2291,27 +2328,96 @@ warn_if_port_is_in_use_by_other_process() {
               }
             }
           }' \
-      | sort -u || true)"
+      | sort -u || true
+  fi
+}
+
+# -----------------------------------------------------------------------------
+# Description: Detects a process (other than our own daemon) listening on
+#              ABS_PORT. If found, identifies it (PID + command) and, when
+#              interactive, offers to stop it (SIGTERM then SIGKILL) and
+#              verifies the port frees before continuing. Declining, or a
+#              non-interactive context, aborts cleanly with guidance instead of
+#              letting ABS die later with an EADDRINUSE stack trace.
+# Inputs:      globals: ABS_PORT, SCRIPT_NAME, PID_FILE
+# Outputs:     stderr: diagnostics; may exit 1
+# Called by:   main (early check + just before launch)
+# -----------------------------------------------------------------------------
+resolve_port_conflict_or_exit() {
+  our_daemon_pid="$(read_daemon_pid_from_file)"
+
+  # Collect listening PIDs, excluding our own (possibly-recorded) daemon.
+  other_pids=""
+  for one_listening_pid in $(list_pids_listening_on_abs_port); do
+    [ -n "$one_listening_pid" ] || continue
+    [ "$one_listening_pid" = "$our_daemon_pid" ] && continue
+    other_pids="$other_pids $one_listening_pid"
+  done
+  [ -n "$(printf '%s' "$other_pids" | tr -d ' ')" ] || return 0
+
+  printf '\n%s\n\n' "$(color_in_bold "$(color_in_red "Port $ABS_PORT is already in use.")")" >&2
+  printf 'These process(es) are listening on port %s:\n' "$ABS_PORT" >&2
+  for one_listening_pid in $other_pids; do
+    process_description="$(ps -p "$one_listening_pid" -o args= 2>/dev/null || true)"
+    [ -n "$process_description" ] || process_description="$(ps -p "$one_listening_pid" -o comm= 2>/dev/null || true)"
+    [ -n "$process_description" ] || process_description="<unknown>"
+    if [ "${#process_description}" -gt 100 ]; then
+      process_description="$(printf '%s' "$process_description" | cut -c1-100)..."
+    fi
+    printf '  PID %s  %s\n' "$one_listening_pid" "$process_description" >&2
+  done
+  printf '\n' >&2
+
+  # Non-interactive: do not kill anything silently; abort cleanly.
+  if [ ! -t 0 ] || [ ! -t 2 ]; then
+    printf '%s Non-interactive context; refusing to start while the port is taken.\n' "$SYM_WARN" >&2
+    printf '  Stop the process above, or use a different port: ABS_PORT=8080 ./%s\n\n' "$SCRIPT_NAME" >&2
+    exit 1
   fi
 
-  [ -n "$pids_listening_on_port" ] || return 0
+  printf 'Stop the above process(es) and continue? [y/N]: ' >&2
+  read -r confirm_port_kill || exit 1
+  case "$confirm_port_kill" in
+    y|Y|yes|YES) ;;
+    *)
+      printf '%s Leaving it running. To resolve:\n' "$SYM_INFO" >&2
+      printf '  1. Stop the other process, or\n' >&2
+      printf '  2. Use a different port: ABS_PORT=8080 ./%s\n\n' "$SCRIPT_NAME" >&2
+      exit 1
+      ;;
+  esac
 
-  if [ -n "$our_daemon_pid" ]; then
-    other_pids_count=0
-    for one_listening_pid in $pids_listening_on_port; do
-      if [ "$one_listening_pid" != "$our_daemon_pid" ]; then
-        other_pids_count=$((other_pids_count + 1))
-      fi
+  for one_listening_pid in $other_pids; do
+    is_positive_integer "$one_listening_pid" || continue
+    [ "$one_listening_pid" = "$$" ] && continue   # never our own shell
+    [ "$one_listening_pid" = "1" ] && continue    # never PID 1
+    printf '%s Stopping PID %s...\n' "$SYM_INFO" "$one_listening_pid" >&2
+    gracefully_stop_pid_with_sigkill_fallback "$one_listening_pid"
+  done
+
+  # Verify the port actually freed. The process may be owned by another user
+  # (our kill was then a no-op), so we must not pretend success.
+  still_listening=""
+  wait_seconds_elapsed=0
+  while [ "$wait_seconds_elapsed" -lt 5 ]; do
+    still_listening=""
+    for one_listening_pid in $(list_pids_listening_on_abs_port); do
+      [ "$one_listening_pid" = "$our_daemon_pid" ] && continue
+      still_listening="$still_listening $one_listening_pid"
     done
-    [ "$other_pids_count" -eq 0 ] && return 0
+    [ -n "$(printf '%s' "$still_listening" | tr -d ' ')" ] || break
+    sleep 1
+    wait_seconds_elapsed=$((wait_seconds_elapsed + 1))
+  done
+
+  if [ -n "$(printf '%s' "$still_listening" | tr -d ' ')" ]; then
+    printf '%s Port %s is still in use (PID(s):%s).\n' "$SYM_ERR" "$ABS_PORT" "$still_listening" >&2
+    printf '  It may be owned by another user; re-run with sufficient privileges,\n' >&2
+    printf '  or use a different port: ABS_PORT=8080 ./%s\n\n' "$SCRIPT_NAME" >&2
+    exit 1
   fi
 
-  printf '\n%s\n\n' "$(color_in_bold "$(color_in_red "WARNING: Port $ABS_PORT is already in use!")")"
-  printf 'Another process is listening on port %s.\n' "$ABS_PORT"
-  printf 'ABS may fail to start or conflict with the existing service.\n\n'
-  printf 'You can:\n'
-  printf '  1. Stop the other process first\n'
-  printf '  2. Set a different port: ABS_PORT=8080 ./%s\n\n' "$SCRIPT_NAME"
+  printf '%s Port %s is now free; continuing.\n' "$SYM_OK" "$ABS_PORT" >&2
 }
 
 # =============================================================================
@@ -3091,9 +3197,22 @@ start_audiobookshelf_daemon_and_print_result() {
   daemon_died_during_health_check=0
   while [ "$health_check_seconds_elapsed" -lt "$STARTUP_HEALTH_CHECK_SECONDS" ]; do
     sleep 1
-    if ! pid_is_our_running_daemon "$newly_started_pid"; then
+    # Liveness via POSIX `kill -0` (works on every OS). The daemon may not have
+    # bound the port yet, so the full identity check would be premature; a
+    # crash-on-startup makes the process exit, which kill -0 detects.
+    if ! kill -0 "$newly_started_pid" 2>/dev/null; then
       daemon_died_during_health_check=1
       break
+    fi
+    # Guard the rare immediate-crash-then-PID-recycled case: fail only when we can
+    # positively see a non-node/bun command (an unreadable comm means the PID is
+    # alive, which is enough).
+    health_check_runtime_comm="$(ps -p "$newly_started_pid" -o comm= 2>/dev/null || true)"
+    if [ -n "$health_check_runtime_comm" ]; then
+      case "$(basename "$health_check_runtime_comm")" in
+        node|bun) ;;
+        *) daemon_died_during_health_check=1; break ;;
+      esac
     fi
     health_check_seconds_elapsed=$((health_check_seconds_elapsed + 1))
   done
@@ -3432,7 +3551,7 @@ main() {
   # catch a process that grabbed the port during the install window.
   case "$CMD" in
     start|foreground|restart)
-      warn_if_port_is_in_use_by_other_process
+      resolve_port_conflict_or_exit
       ;;
   esac
 
@@ -3477,7 +3596,7 @@ main() {
   INSTALL_IN_PROGRESS=0
 
   # --- Stage 17: Launch ---
-  warn_if_port_is_in_use_by_other_process
+  resolve_port_conflict_or_exit
   rotate_log_file_if_threshold_exceeded
 
   if [ "$DEV_MODE" = "true" ]; then
